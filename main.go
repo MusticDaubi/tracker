@@ -222,15 +222,17 @@ func printTransactions(transactions []Transaction) {
 
 func printStatistics(income, expense float64, stats map[string]float64) {
 	balance := income - expense
+	useColor := isColorSupported()
 
-	const (
-		reset  = "\033[0m"
-		red    = "\033[31m"
-		green  = "\033[32m"
+	reset, red, green, yellow, cyan, bold := "", "", "", "", "", ""
+	if useColor {
+		reset = "\033[0m"
+		red = "\033[31m"
+		green = "\033[32m"
 		yellow = "\033[33m"
-		cyan   = "\033[36m"
-		bold   = "\033[1m"
-	)
+		cyan = "\033[36m"
+		bold = "\033[1m"
+	}
 
 	fmt.Printf("\n%s=== FINANCIAL STATISTICS ===%s\n", bold, reset)
 
@@ -330,4 +332,20 @@ func enableForHandle(f *os.File) {
 	}
 	const enableVirtualTerminalProcessing uint32 = 0x0004
 	windows.SetConsoleMode(handle, mode|enableVirtualTerminalProcessing)
+}
+
+func isColorSupported() bool {
+	if _, noColor := os.LookupEnv("NO_COLOR"); noColor {
+		return false
+	}
+
+	if runtime.GOOS == "windows" {
+		return true
+	}
+
+	if fileInfo, _ := os.Stdout.Stat(); (fileInfo.Mode() & os.ModeCharDevice) != 0 {
+		return true
+	}
+
+	return false
 }
