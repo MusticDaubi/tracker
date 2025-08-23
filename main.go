@@ -24,6 +24,24 @@ type Transaction struct {
 	Date        string
 }
 
+type Budget struct {
+	ID        int
+	Category  string
+	Amount    float64
+	Period    string
+	StartDate string
+	EndDate   string
+}
+
+const (
+	colorReset  = "\033[0m"
+	colorRed    = "\033[31m"
+	colorGreen  = "\033[32m"
+	colorYellow = "\033[33m"
+	colorCyan   = "\033[36m"
+	colorBold   = "\033[1m"
+)
+
 func main() {
 	if runtime.GOOS == "windows" {
 		enableANSISupport()
@@ -64,8 +82,26 @@ func main() {
 	statsStartDate := statsCmd.String("start", "", "Custom start date (YYYY-MM-DD)")
 	statsEndDate := statsCmd.String("end", "", "Custom end date (YYYY-MM-DD)")
 
+	budgetCmd := flag.NewFlagSet("budget", flag.ExitOnError)
+	budgetAdd := budgetCmd.Bool("add", false, "Add new budget")
+	budgetList := budgetCmd.Bool("list", false, "List all budgets")
+	budgetRemove := budgetCmd.Bool("remove", false, "Remove budget")
+	budgetCategory := budgetCmd.String("category", "", "Budget category")
+	budgetAmount := budgetCmd.Float64("amount", 0, "Budget amount")
+	budgetPeriod := budgetCmd.String("period", "monthly", "Budget period (monthly/weekly/yearly)")
+	budgetStart := budgetCmd.String("start", "", "Start date (YYYY-MM-DD)")
+	budgetEnd := budgetCmd.String("end", "", "End date (YYYY-MM-DD)")
+
+	resetCmd := flag.NewFlagSet("reset", flag.ExitOnError)
+	resetConfirm := resetCmd.Bool("confirm", false, "Confirm database reset")
+
 	if len(os.Args) < 2 {
-		fmt.Println("Expected command: add, list, update, delete, stats")
+		printHelp()
+		fmt.Println("\nThe application will now close.")
+		fmt.Println("To use the application, open a command prompt and run:")
+		fmt.Println("finance.exe [command] [flags]")
+		fmt.Println("\nPress Enter to exit...")
+		fmt.Scanln()
 		os.Exit(1)
 	}
 
@@ -73,6 +109,7 @@ func main() {
 	case "add":
 		err := addCmd.Parse(os.Args[2:])
 		if err != nil {
+			fmt.Printf("Error: %s \n", err)
 			return
 		}
 		transaction := Transaction{
@@ -88,11 +125,39 @@ func main() {
 		if err = AddTransaction(transaction); err != nil {
 			log.Fatal(err)
 		}
+		if transaction.Type == "expense" {
+			spent, total, err := CheckBudget(transaction.Category, "monthly")
+			if err == nil {
+				percentage := (spent / total) * 100
+				if percentage > 100 {
+					fmt.Printf("%sWARNING: Budget exceeded for %s! (%.1f%%)%s\n",
+						colorRed, transaction.Category, percentage, colorReset)
+				} else if percentage > 90 {
+					fmt.Printf("%sWARNING: Approaching budget limit for %s (%.1f%%)%s\n",
+						colorYellow, transaction.Category, percentage, colorReset)
+				}
+			}
+		}
 		fmt.Println("Transaction added successfully!")
+	case "reset":
+		err := resetCmd.Parse(os.Args[2:])
+		if err != nil {
+			fmt.Printf("Error: %s \n", err)
+			return
+		}
+		if !*resetConfirm {
+			fmt.Println("Warning: This will delete all data! Use -confirm to proceed")
+			return
+		}
+		if err = ResetDB(); err != nil {
+			log.Fatal("Reset error: ", err)
+		}
+		fmt.Println("Database reset successfully")
 
 	case "list":
 		err := listCmd.Parse(os.Args[2:])
 		if err != nil {
+			fmt.Printf("Error: %s \n", err)
 			return
 		}
 		transactions, err := GetTransactions(
@@ -110,6 +175,7 @@ func main() {
 	case "update":
 		err := updateCmd.Parse(os.Args[2:])
 		if err != nil {
+			fmt.Printf("Error: %s \n", err)
 			return
 		}
 		if *updateID == 0 {
@@ -132,6 +198,7 @@ func main() {
 	case "delete":
 		err := deleteCmd.Parse(os.Args[2:])
 		if err != nil {
+			fmt.Printf("Error: %s \n", err)
 			return
 		}
 		if *deleteID == 0 {
@@ -145,6 +212,7 @@ func main() {
 	case "stats":
 		err := statsCmd.Parse(os.Args[2:])
 		if err != nil {
+			fmt.Printf("Error: %s \n", err)
 			return
 		}
 		income, expense, err := GetBalance(
@@ -166,6 +234,50 @@ func main() {
 		}
 
 		printStatistics(income, expense, stats)
+	case "budget":
+		err := budgetCmd.Parse(os.Args[2:])
+		if err != nil {
+			fmt.Printf("Error: %s \n", err)
+			return
+		}
+		if *budgetAdd {
+			if *budgetCategory == "" || *budgetAmount <= 0 {
+				log.Fatal("Category and amount are required")
+			}
+			budget := Budget{
+				Category:  *budgetCategory,
+				Amount:    *budgetAmount,
+				Period:    *budgetPeriod,
+				StartDate: *budgetStart,
+				EndDate:   *budgetEnd,
+			}
+
+			if err = validateBudget(budget); err != nil {
+				log.Fatal("Budget validation error: ", err)
+			}
+
+			if err = AddBudget(budget); err != nil {
+				log.Fatal(err)
+			}
+
+			fmt.Println("Budget added successfully!")
+		} else if *budgetList {
+			budgets, err := GetBudgets()
+			if err != nil {
+				log.Fatal(err)
+			}
+			printBudgets(budgets)
+		} else if *budgetRemove {
+			if *budgetCategory == "" {
+				log.Fatal("Category is required")
+			}
+			if err = RemoveBudget(*budgetCategory); err != nil {
+				log.Fatal(err)
+			}
+			fmt.Printf("Budget for category '%s' removed\n", *budgetCategory)
+		} else {
+			budgetCmd.Usage()
+		}
 	default:
 		printHelp()
 		os.Exit(1)
@@ -174,11 +286,20 @@ func main() {
 
 func printHelp() {
 	fmt.Println(`Personal Finance Tracker - Usage:
+    
+Commands:
   add     - Add new transaction
   list    - List transactions
   update  - Update transaction
   delete  - Delete transaction
   stats   - Show statistics
+  budget  - Manage budgets
+  reset   - Reset database
+
+Examples:
+  finance add -type income -category salary -amount 2500 -date 2023-09-01
+  finance list -type expense
+  finance stats -period month
 
 Use 'finance [command] -h' for command-specific help`)
 }
@@ -238,6 +359,32 @@ func printStatistics(income, expense float64, stats map[string]float64) {
 
 	fmt.Printf("\n%sTotal Income:%s  $%.2f\n", bold, reset, income)
 	fmt.Printf("%sTotal Expenses:%s $%.2f\n", bold, reset, expense)
+
+	budgets, err := GetBudgets()
+	if err == nil && len(budgets) > 0 {
+		fmt.Printf("\n%sBudget Status:%s\n", bold, reset)
+
+		for _, budget := range budgets {
+			spent, total, err := CheckBudget(budget.Category, budget.Period)
+			if err != nil {
+				continue
+			}
+
+			percentage := (spent / total) * 100
+			statusColor := green
+			if percentage > 90 {
+				statusColor = red
+			} else if percentage > 75 {
+				statusColor = yellow
+			}
+
+			fmt.Printf(" - %s%-15s%s: $%s%.2f%s / $%s%.2f%s (%s%.1f%%%s)\n",
+				cyan, budget.Category, reset,
+				statusColor, spent, reset,
+				yellow, total, reset,
+				statusColor, percentage, reset)
+		}
+	}
 
 	balanceColor := green
 	balanceSign := ""
@@ -348,4 +495,72 @@ func isColorSupported() bool {
 	}
 
 	return false
+}
+
+func printBudgets(budgets []Budget) {
+	useColor := isColorSupported()
+	reset, bold := "", ""
+	if useColor {
+		reset = colorReset
+		bold = colorBold
+	}
+
+	fmt.Printf("\n%s=== BUDGETS ===%s\n", bold, reset)
+	fmt.Printf("%-4s %-15s %-10s %-10s %-12s %-12s\n", "ID", "Category", "Amount", "Period", "Start", "End")
+	fmt.Println(strings.Repeat("-", 65))
+
+	for _, b := range budgets {
+		fmt.Printf("%-4d %-15s $%-9.2f %-10s %-12s %-12s\n",
+			b.ID,
+			b.Category,
+			b.Amount,
+			b.Period,
+			b.StartDate,
+			b.EndDate)
+	}
+}
+
+func validateBudget(b Budget) error {
+	if b.Category == "" {
+		return errors.New("category is required")
+	}
+
+	if b.Amount <= 0 {
+		return errors.New("amount must be positive")
+	}
+
+	validPeriods := map[string]bool{
+		"monthly": true,
+		"weekly":  true,
+		"yearly":  true,
+	}
+	if !validPeriods[b.Period] {
+		return errors.New("invalid period, must be monthly, weekly or yearly")
+	}
+
+	if b.StartDate != "" {
+		if _, err := time.Parse("2006-01-02", b.StartDate); err != nil {
+			return errors.New("invalid start date format, use YYYY-MM-DD")
+		}
+	}
+
+	if b.EndDate != "" {
+		if _, err := time.Parse("2006-01-02", b.EndDate); err != nil {
+			return errors.New("invalid end date format, use YYYY-MM-DD")
+		}
+	}
+
+	if b.EndDate != "" && b.StartDate == "" {
+		return errors.New("start date is required when end date is specified")
+	}
+
+	if b.StartDate != "" && b.EndDate != "" {
+		start, _ := time.Parse("2006-01-02", b.StartDate)
+		end, _ := time.Parse("2006-01-02", b.EndDate)
+		if end.Before(start) {
+			return errors.New("end date cannot be before start date")
+		}
+	}
+
+	return nil
 }

@@ -40,7 +40,139 @@ func InitDB() error {
     `
 
 	_, err = db.Exec(createIndexes)
+	if err != nil {
+		return err
+	}
+
+	createBudgetTable := `
+    CREATE TABLE IF NOT EXISTS budgets (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        category TEXT NOT NULL UNIQUE,
+        amount REAL NOT NULL,
+        period TEXT NOT NULL,
+        start_date TEXT,
+        end_date TEXT
+    );`
+
+	_, err = db.Exec(createBudgetTable)
+
 	return err
+}
+
+func ResetDB() error {
+	_, err := db.Exec("PRAGMA foreign_keys = OFF")
+	if err != nil {
+		return err
+	}
+
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+
+	tables := []string{"transactions", "budgets"}
+	for _, table := range tables {
+		_, err = tx.Exec("DELETE FROM " + table)
+		if err != nil {
+			tx.Rollback()
+			return err
+		}
+
+		_, err = tx.Exec("DELETE FROM sqlite_sequence WHERE name = ?", table)
+		if err != nil {
+			tx.Rollback()
+			return err
+		}
+	}
+
+	_, err = tx.Exec("PRAGMA foreign_keys = ON")
+	if err != nil {
+		tx.Rollback()
+		return err
+	}
+
+	return tx.Commit()
+}
+
+func AddBudget(b Budget) error {
+	existing, err := GetBudget(b.Category)
+	if err == nil && existing.ID != 0 {
+		return errors.New("budget for this category already exists")
+	}
+
+	query := `
+        INSERT OR REPLACE INTO budgets (category, amount, period, start_date, end_date)
+        VALUES (:category, :amount, :period, :start_date, :end_date)
+    `
+	_, err = db.Exec(query, sql.Named("category", b.Category), sql.Named("amount", b.Amount), sql.Named("period", b.Period), sql.Named("start_date", b.StartDate), sql.Named("end_date", b.EndDate))
+	return err
+}
+
+func GetBudgets() ([]Budget, error) {
+	rows, err := db.Query("SELECT id, category, amount, period, start_date, end_date FROM budgets")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var budgets []Budget
+	for rows.Next() {
+		var b Budget
+		err = rows.Scan(&b.ID, &b.Category, &b.Amount, &b.Period, &b.StartDate, &b.EndDate)
+		if err != nil {
+			return nil, err
+		}
+		budgets = append(budgets, b)
+	}
+	return budgets, nil
+}
+
+func GetBudget(category string) (Budget, error) {
+	var b Budget
+	row := db.QueryRow("SELECT id, category, amount, period, start_date, end_date FROM budgets WHERE category = ?", category)
+	err := row.Scan(&b.ID, &b.Category, &b.Amount, &b.Period, &b.StartDate, &b.EndDate)
+	return b, err
+}
+
+func RemoveBudget(category string) error {
+	_, err := db.Exec("DELETE FROM budgets WHERE category = ?", category)
+	return err
+}
+
+func CheckBudget(category string, period string) (currentSpent, budgetAmount float64, err error) {
+	b, err := GetBudget(category)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return 0, 0, nil
+		}
+		return 0, 0, err
+	}
+
+	var whereClause string
+	switch period {
+	case "monthly":
+		whereClause = "strftime('%Y-%m', date) = strftime('%Y-%m', 'now')"
+	case "weekly":
+		whereClause = "date >= date('now', 'weekday 0', '-7 days') AND date <= date('now')"
+	case "yearly":
+		whereClause = "strftime('%Y', date) = strftime('%Y', 'now')"
+	default:
+		whereClause = "1=1"
+	}
+
+	query := fmt.Sprintf(`
+        SELECT COALESCE(SUM(amount), 0)
+        FROM transactions
+        WHERE type = 'expense' AND category = ? AND %s
+    `, whereClause)
+
+	row := db.QueryRow(query, category)
+	err = row.Scan(&currentSpent)
+	if err != nil {
+		return 0, 0, err
+	}
+
+	return currentSpent, b.Amount, nil
 }
 
 func AddTransaction(t Transaction) error {
@@ -177,7 +309,7 @@ func GetBalance(period, startDate, endDate string) (income, expense float64, err
 	row := db.QueryRow(query, args...)
 	err = row.Scan(&income)
 	if err != nil {
-		return 0, 0, err
+		return 0, 0, fmt.Errorf("failed to get income: %w", err)
 	}
 
 	query = fmt.Sprintf(`
@@ -187,7 +319,7 @@ func GetBalance(period, startDate, endDate string) (income, expense float64, err
 	row = db.QueryRow(query, args...)
 	err = row.Scan(&expense)
 	if err != nil {
-		return 0, 0, err
+		return 0, 0, fmt.Errorf("failed to get expense: %w", err)
 	}
 
 	return income, expense, nil
